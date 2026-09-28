@@ -18,18 +18,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 current_players = []
 game_active = False
 
-# --- שרת אינטרנט זעיר כדי ש-Render ידליק את הבוט מיד ---
+# --- שרת אינטרנט זעיר למניעת קריסות באתרי אירוח ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "The bot is alive and running!"
-
-def run_web():
-    # פתיחת פורט 10000 ש-Render מחפש כדי לעבור למצב Live
-    app.run(host='0.0.0.0', port=10000)
-
-# הפעלת השרת ברקע
+def home(): return "The bot is alive!"
+def run_web(): app.run(host='0.0.0.0', port=10000)
 threading.Thread(target=run_web, daemon=True).start()
 
 @bot.event
@@ -41,38 +34,65 @@ async def on_ready():
         print(f"שגיאה בסנכרון פקודות: {e}")
     print(f'הבוט מחובר ומפעיל את המשחק כעת בתור: {bot.user.name}')
 
-# --- פקודת סלאש: SAY ---
-@bot.tree.command(name="say", description="גרום לבוט להגיד הודעה כלשהי בערוץ")
-@app_commands.describe(text="הטקסט שאתה רוצה שהבוט יגיד")
-async def say(interaction: discord.Interaction, text: str):
-    await interaction.channel.send(text)
-    await interaction.response.send_message("ההודעה נשלחה!", ephemeral=True)
+# --- כפתור ההצטרפות האינטראקטיבי ---
+class GameJoinView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # הכפתור לא יפוג לעולם
 
-# --- פקודות המשחק ---
-@bot.tree.command(name="להרשם", description="הצטרף למשחק האי של טרופי")
-async def register(interaction: discord.Interaction):
-    global game_active
+    @discord.ui.button(label="הצטרף", style=discord.ButtonStyle.green, emoji="🎮")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global game_active
+        if game_active:
+            await interaction.response.send_message("המשחק כבר התחיל! לא ניתן להירשם כרגע.", ephemeral=True)
+            return
+        
+        if interaction.user not in current_players:
+            current_players.append(interaction.user)
+            # הודעה זמנית שרק הלוחץ רואה כדי לא להציף את הערוץ
+            await interaction.response.send_message(f"🎮 הצטרפת בהצלחה למשחק! (סך הכל רשומים: {len(current_players)})", ephemeral=True)
+            
+            # עדכון ההודעה המרכזית עם מספר הרשומים העדכני
+            embed = interaction.message.embeds[0]
+            embed.set_footer(text=f"👥 שחקנים רשומים כרגע: {len(current_players)}")
+            await interaction.message.edit(embed=embed, view=self)
+        else:
+            await interaction.response.send_message("אתה כבר רשום למשחק!", ephemeral=True)
+
+# --- פקודת סלאש: הפעלה (יוצרת את ההודעה מהתמונה עם הכפתור) ---
+@bot.tree.command(name="הפעלה", description="שלח הודעת הרשמה למשחק עם כפתור לחיצה")
+async def setup_game(interaction: discord.Interaction):
+    global game_active, current_players
     if game_active:
-        await interaction.response.send_message("המשחק כבר התחיל! לא ניתן להירשם כרגע.", ephemeral=True)
+        await interaction.response.send_message("יש כבר משחק פעיל ברגע זה.", ephemeral=True)
         return
-    if interaction.user not in current_players:
-        current_players.append(interaction.user)
-        await interaction.response.send_message(f"🎮 {interaction.user.display_name} נרשם בהצלחה למשחק!")
-    else:
-        await interaction.response.send_message("אתה כבר רשום למשחק!", ephemeral=True)
+        
+    current_players = [] # איפוס השחקנים לתחילת הרשמה חדשה
+    
+    # יצירת ההודעה המעוצבת (Embed) כמו בתמונה שלך
+    embed = discord.Embed(
+        title="🎮 הפעלה התחילה",
+        description="לחצו על הכפתור כדי להיכנס למשחק ולהצטרף לרשימת המשתתפים.\n\n**בהנחיית:** " + interaction.user.mention,
+        color=discord.Color.purple() # הפס הסגול בצד
+    )
+    embed.set_footer(text="👥 שחקנים רשומים כרגע: 0")
+    
+    # שליחת ההודעה יחד עם הכפתור הירוק
+    view = GameJoinView()
+    await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="התחל", description="התחל את משחק ההדחות (למנהלים)")
+# --- פקודת סלאש: התחל ---
+@bot.tree.command(name="התחל", description="התחל את משחק ההדחות אחרי שכולם נרשמו")
 async def start_game(interaction: discord.Interaction):
     global game_active, current_players
     if game_active:
         await interaction.response.send_message("יש כבר משחק פעיל ברגע זה.", ephemeral=True)
         return
     if len(current_players) < 2:
-        await interaction.response.send_message("צריך לפחות 2 שחקנים כדי להתחיל את המשחק!", ephemeral=True)
+        await interaction.response.send_message("צריך לפחות 2 שחקנים שנרשמו דרך הכפתור כדי להתחיל!", ephemeral=True)
         return
 
     game_active = True
-    await interaction.response.send_message("🚀 המשחק מתחיל! מכין את לוח השחקנים על החוף...")
+    await interaction.response.send_message("🚀 ההרשמה נסגרה! המשחק מתחיל על החוף...")
     ctx_channel = interaction.channel
 
     while len(current_players) > 1:
@@ -84,10 +104,18 @@ async def start_game(interaction: discord.Interaction):
         await ctx_channel.send(content=f"⚡ הברק פגע ב-**{eliminated_player.display_name}** והוא מודח מהאי!", file=file)
         current_players.remove(eliminated_player)
 
-    winner = current_players
+    winner = current_players[0]
     await ctx_channel.send(f"👑 **ברכות! {winner.mention} שרד את האי והוא המנצח הגדול!** 👑")
+    
     current_players = []
     game_active = False
+
+# --- פקודת סלאש: SAY ---
+@bot.tree.command(name="say", description="גרום לבוט להגיד הודעה כלשהי בערוץ")
+@app_commands.describe(text="הטקסט שאתה רוצה שהבוט יגיד")
+async def say(interaction: discord.Interaction, text: str):
+    await interaction.channel.send(text)
+    await interaction.response.send_message("ההודעה נשלחה!", ephemeral=True)
 
 async def create_game_screen(players, struck_player):
     try:
