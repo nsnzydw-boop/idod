@@ -1,119 +1,146 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import random
 import asyncio
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageOps
 import io
 import os
+from flask import Flask
+import threading
 
 # הגדרת הבוט והרשאות
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# רשימת השחקנים שנרשמו למשחק
 current_players = []
 game_active = False
 
 @bot.event
 async def on_ready():
+    # סנכרון פקודות הסלאש מול השרתים של דיסקורד
+    try:
+        synced = await bot.tree.sync()
+        print(f"סונכרנו בהצלחה {len(synced)} פקודות סלאש!")
+    except Exception as e:
+        print(f"שגיאה בסנכרון פקודות: {e}")
     print(f'הבוט מחובר ומפעיל את המשחק כעת בתור: {bot.user.name}')
 
-@bot.command(name="להרשם")
-async def register(ctx):
-    """פקודה לשחקנים להצטרף למשחק"""
+# --- פקודת הסלאש החדשה: SAY ---
+@bot.tree.command(name="say", description="גרום לבוט להגיד הודעה כלשהי בערוץ")
+@app_commands.describe(text="הטקסט שאתה רוצה שהבוט יגיד")
+async def say(interaction: discord.Interaction, text: str):
+    # שליחת ההודעה שהמשתמש ביקש
+    await interaction.channel.send(text)
+    # אישור קטן ונסתר (רק המשתמש רואה) שהפקודה בוצעה בהצלחה
+    await interaction.response.send_message("ההודעה נשלחה!", ephemeral=True)
+
+# --- פקודות המשחק המעודכנות לפקודות סלאש ---
+
+@bot.tree.command(name="להרשם", description="הצטרף למשחק האי של טרופי")
+async def register(interaction: discord.Interaction):
     global game_active
     if game_active:
-        await ctx.send("המשחק כבר התחיל! לא ניתן להירשם כרגע.")
+        await interaction.response.send_message("המשחק כבר התחיל! לא ניתן להירשם כרגע.", ephemeral=True)
         return
-    
-    if ctx.author not in current_players:
-        current_players.append(ctx.author)
-        await ctx.send(f"🎮 {ctx.author.display_name} נרשם בהצלחה למשחק!")
+    if interaction.user not in current_players:
+        current_players.append(interaction.user)
+        await interaction.response.send_message(f"🎮 {interaction.user.display_name} נרשם בהצלחה למשחק!")
     else:
-        await ctx.send("אתה כבר רשום למשחק!")
+        await interaction.response.send_message("אתה כבר רשום למשחק!", ephemeral=True)
 
-@bot.command(name="התחל")
-async def start_game(ctx):
-    """פקודה למנהל להתחיל את הרולטה וההדחות"""
+@bot.tree.command(name="התחל", description="התחל את משחק ההדחות (למנהלים)")
+async def start_game(interaction: discord.Interaction):
     global game_active, current_players
     if game_active:
-        await ctx.send("יש כבר משחק פעיל ברגע זה.")
+        await interaction.response.send_message("יש כבר משחק פעיל ברגע זה.", ephemeral=True)
         return
     if len(current_players) < 2:
-        await ctx.send("צריך לפחות 2 שחקנים כדי להתחיל את המשחק!")
+        await interaction.response.send_message("צריך לפחות 2 שחקנים כדי להתחיל את המשחק!", ephemeral=True)
         return
 
     game_active = True
-    await ctx.send("🚀 המשחק מתחיל! מכין את לוח השחקנים...")
+    await interaction.response.send_message("🚀 המשחק מתחיל! מכין את לוח השחקנים על החוף...")
 
-    # לולאת המשחק - ממשיכה כל עוד יש יותר משחקן אחד
+    ctx_channel = interaction.channel
+
     while len(current_players) > 1:
-        await asyncio.sleep(4)  # הפסקה קלה בין סיבוב לסיבוב
+        await asyncio.sleep(5)
         
-        # בחירת שחקן אקראי שיודח (הברק פוגע בו)
         eliminated_player = random.choice(current_players)
+        image_bytes = await create_game_screen(current_players, eliminated_player)
         
-        # יצירת התמונה המעודכנת של המצב הנוכחי עם אפקט הברק על המודח
-        image_bytes = create_game_screen(current_players, eliminated_player)
-        
-        # שליחת התמונה לערוץ הדיסקורד
         file = discord.File(fp=image_bytes, filename="game_round.png")
-        await ctx.send(content=f"⚡ הברק פגע ב-**{eliminated_player.display_name}** והוא מודח!", file=file)
+        await ctx_channel.send(content=f"⚡ הברק פגע ב-**{eliminated_player.display_name}** והוא מודח מהאי!", file=file)
         
-        # הסרת השחקן המודח מהרשימה
         current_players.remove(eliminated_player)
 
-    # הכרזה על המנצח האחרון שנשאר
     winner = current_players[0]
-    await ctx.send(f"👑 **ברכות! {winner.mention} הוא המנצח האחרון שנשאר במשחק!** 👑")
+    await ctx_channel.send(f"👑 **ברכות! {winner.mention} שרד את האי והוא המנצח הגדול!** 👑")
     
-    # איפוס המשחק
     current_players = []
     game_active = False
 
-def create_game_screen(players, struck_player):
-    """פונקציה גרפית שמחברת את השחקנים, השמות ואפקט הברק על תמונת הרקע"""
-    # טעינת רקע המשחק
+async def create_game_screen(players, struck_player):
     try:
         base_img = Image.open("background.png").convert("RGBA")
     except FileNotFoundError:
-        # יצירת רקע זמני אם הקובץ לא קיים
         base_img = Image.new("RGBA", (1000, 500), (34, 139, 34))
 
-    # טעינת אפקט הברק
-    try:
-        lightning_img = Image.open("lightning.png").convert("RGBA").resize((100, 150))
-    except FileNotFoundError:
-        lightning_img = None
-
-    draw = ImageDraw.Draw(base_img)
-    
-    # חישוב מיקומים בשורה (כמו בתמונה של טרופי)
     screen_width, screen_height = base_img.size
     spacing = screen_width // (len(players) + 1)
     
     for i, player in enumerate(players):
-        # מיקום ה-X של השחקן הנוכחי בשורה
         x_pos = spacing * (i + 1) - 40
-        y_pos = screen_height // 2
+        y_pos = int(screen_height * 0.55)
         
-        # ציור עיגול שמייצג את השחקן (אוואטר)
-        avatar_color = (255, 165, 0) if player != struck_player else (255, 0, 0)
-        draw.ellipse([x_pos, y_pos, x_pos + 80, y_pos + 80], fill=avatar_color, outline=(255, 255, 255), width=3)
-        
-        # כתיבת שם השחקן מתחת לדמות
-        draw.text((x_pos + 10, y_pos + 90), player.display_name[:10], fill=(255, 255, 255))
-        
-        # אם זה השחקן שמודח בסיבוב הזה, נדביק עליו את אפקט הברק
-        if player == struck_player and lightning_img:
-            base_img.paste(lightning_img, (x_pos - 10, y_pos - 100), lightning_img)
+        try:
+            avatar_url = player.display_avatar.with_format("png").with_size(128).url
+            async with bot.session.get(avatar_url) as resp:
+                if resp.status == 200:
+                    avatar_data = await resp.read()
+                    avatar_img = Image.open(io.BytesIO(avatar_data)).convert("RGBA").resize((80, 80))
+                    
+                    mask = Image.new("L", (80, 80), 0)
+                    draw_mask = ImageDraw.Draw(mask)
+                    draw_mask.ellipse([0, 0, 80, 80], fill=255)
+                    
+                    output = ImageOps.fit(avatar_img, (80, 80), centering=(0.5, 0.5))
+                    output.putalpha(mask)
+                    
+                    border_color = (255, 0, 0) if player == struck_player else (255, 255, 255)
+                    border_img = Image.new("RGBA", (86, 86), (0,0,0,0))
+                    draw_border = ImageDraw.Draw(border_img)
+                    draw_border.ellipse([0, 0, 86, 86], outline=border_color, width=4)
+                    
+                    base_img.paste(border_img, (x_pos - 3, y_pos - 3), border_img)
+                    base_img.paste(output, (x_pos, y_pos), output)
+        except Exception:
+            draw = ImageDraw.Draw(base_img)
+            avatar_color = (255, 165, 0) if player != struck_player else (255, 0, 0)
+            draw.ellipse([x_pos, y_pos, x_pos + 80, y_pos + 80], fill=avatar_color, outline=(255, 255, 255), width=3)
 
-    # שמירת התמונה לזיכרון ושליחתה כקובץ לדיסקורד
+        draw_text = ImageDraw.Draw(base_img)
+        draw_text.text((x_pos + 5, y_pos + 90), player.display_name[:10], fill=(255, 255, 255))
+
     img_byte_arr = io.BytesIO()
     base_img.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     return img_byte_arr
 
-# משיכת הטוקן הסודי בצורה מאובטחת
+# שרת רקע ל-Render
+app = Flask('')
+@app.route('/')
+def home(): return "I am alive!"
+
+def run_web(): app.run(host='0.0.0.0', port=10000)
+threading.Thread(target=run_web).start()
+
+@bot.event
+async def on_connect():
+    import aiohttp
+    bot.session = aiohttp.ClientSession()
+
 bot.run(os.getenv('DISCORD_TOKEN'))
